@@ -1,3 +1,25 @@
+# Intro - Automatic heat ↔ AC switching for climates that need both on the same day (package + dashboard)
+
+After decades of living where the AC can run on New Year's Day and the heat on a spring morning, I realized I'd had a mental subroutine running all fall and spring: feathering the thermostat between heat and cool all day. Thermostat "auto" modes didn't help; they want a wide gap between setpoints and in practice let the house drift several degrees before switching.
+
+So I built a Home Assistant package that does it for me. It's been running my house for about a month and it's been a huge quality-of-life win.
+
+**How it works**
+
+- The setpoints are comfort targets, not switching thresholds. The thermostat is only ever in heat *or* cool, so the heat and cool targets can sit 1°F apart without fighting.
+- Switching has its own rules, deliberately lopsided toward AC (my family prefers too-cool over too-warm): heat needs the house below target for 45 min *and* a forecast that isn't about to warm up. Going back to AC is fast.
+- "Projected high" = my own outdoor sensor + the forecast's warm-up over the next few hours, because my yard regularly runs several degrees off the official station.
+- Separate morning ramp-up / evening ramp-down schedules for heat and AC.
+- One automation is the only thing that ever writes to the thermostat. It verifies every command actually reached the physical thermostat and retries, which turned out to matter: a cloud API error once left my Nest 2°F off schedule all night while HA showed the right value.
+- Notifications explain *why* every switch happened.
+- Dashboard with Control / Schedule / Tuning / History tabs.
+
+It's built on Versatile Thermostat over a Nest (so swapping the thermostat later is a one-line change), but works with a plain climate entity too.
+
+# Note that this is not a project created for general usage, it is bespoke to my needs and I'm sharing the repo just as an example. I will not be responding to bug reports or feature requests, so take it or leave it as-is and I hope it helps you!
+
+---
+
 # Swing-Season HVAC for Home Assistant
 
 Automatic heat ↔ AC switching for climates where you can need **both on the same day**, sometimes more than once. Built for comfort first, with guards so the heat and AC never fight.
