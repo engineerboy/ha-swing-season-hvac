@@ -1,0 +1,310 @@
+# Comfort dashboard for Swing-Season HVAC.
+# To use: Settings -> Dashboards -> Add dashboard -> "New dashboard from scratch",
+# open it, three-dot menu -> Edit dashboard -> three-dot menu -> Raw configuration
+# editor, paste this whole file, and save.
+# Entity IDs match packages/swing_season_hvac.yaml; change the same placeholders
+# here (climate.house_thermostat, sensor.indoor_*, sensor.outdoor_*, weather.*).
+views:
+  - title: Control
+    path: control
+    icon: mdi:thermostat
+    type: sections
+    max_columns: 3
+    sections:
+      - type: grid
+        cards:
+          - type: heading
+            heading: Thermostat
+            icon: mdi:thermostat
+          - type: thermostat
+            entity: climate.house_thermostat
+            name: House
+            features:
+              - type: climate-hvac-modes
+                style: icons
+          - type: tile
+            entity: input_boolean.climate_v2_in_control
+            name: Automatic control
+            icon: mdi:robot
+            features:
+              - type: toggle
+            features_position: inline
+          - type: tile
+            entity: input_boolean.climate_v2_verbose_notifications
+            name: Notify on every setpoint change
+            icon: mdi:bell-cog
+            features:
+              - type: toggle
+            features_position: inline
+          - type: markdown
+            text_only: true
+            content: >-
+              {% if is_state('input_boolean.climate_v2_in_control','on') %}<ha-alert alert-type="info">Automatic
+              control is **on**. Setpoint changes made here are reset to the schedule within 5 minutes. Turn
+              automatic control off to take over manually.</ha-alert>{% else %}<ha-alert alert-type="warning">Automatic
+              control is **off**. The thermostat is fully manual.</ha-alert>{% endif %}
+      - type: grid
+        cards:
+          - type: heading
+            heading: Right now
+            icon: mdi:home-thermometer
+          - type: markdown
+            content: |-
+              {% set vt = 'climate.house_thermostat' %}{% set cur = states(vt) %}{% set want = states('sensor.climate_v2_desired_mode') %}{% set u = (state_attr(vt,'vtherm_over_climate') or {}).get('underlying_entities', []) %}{% set d = u[0] if u | count == 1 else none %}**Mode:** {{ cur }} ({{ state_attr(vt,'hvac_action') }}) at {{ state_attr(vt,'temperature') }}°F
+              **Automation wants:** {{ want }}{% if cur != want %} *(switch pending)*{% endif %}
+              {% if d %}**{{ state_attr(d,'friendly_name') or d }} thermostat:** {{ states(d) }} at {{ state_attr(d,'temperature') }}°F {% if (state_attr(d,'temperature') | float(0) - state_attr(vt,'temperature') | float(0)) | abs >= 0.5 or states(d) != cur %}⚠️ out of sync (auto re-send within 5 min){% else %}✓ in sync{% endif %}
+              {% endif %}**Last switch:** {{ relative_time(as_datetime(states('input_datetime.climate_v2_last_mode_switch')) | as_local) if states('input_datetime.climate_v2_last_mode_switch') not in ['unknown','unavailable'] else 'never' }} ago
+
+              {% if cur == 'heat' %}{% if is_state('binary_sensor.climate_v2_too_warm_in_heat','on') %}❄️ Too warm while heating: going back to AC.{% elif is_state('binary_sensor.climate_v2_warm_day_ahead','on') %}❄️ Warm-up forecast: heat no longer needed, going back to AC.{% else %}🔥 Heating. Returns to AC once the house is {{ states('input_number.climate_v2_leave_heat_above_cool_target_by') }}°F above the cool target, or a warm-up is forecast.{% endif %}{% else %}{% if is_state('binary_sensor.climate_v2_emergency_heat','on') %}🔥 Emergency heat: house is far below the heat target.{% elif is_state('binary_sensor.climate_v2_heat_needed','on') %}🔥 Heat needed: house below heat target and no warm-up forecast.{% elif is_state('binary_sensor.climate_v2_heat_allowed_by_forecast','off') %}❄️ Staying on AC. Heat is blocked: projected high over the next {{ states('input_number.climate_v2_forecast_lookahead_hours') | int }} h ({{ states('sensor.climate_v2_outdoor_high_projected') }}°F) is above the {{ states('input_number.climate_v2_heat_allowed_if_outdoor_high_at_or_below') | int }}°F limit.{% else %}❄️ Staying on AC. Heat would start if the house drops {{ states('input_number.climate_v2_heat_when_below_heat_target_by') }}°F below the heat target ({{ (states('sensor.climate_v2_heat_target') | float(0) - states('input_number.climate_v2_heat_when_below_heat_target_by') | float(0)) | round(1) }}°F) for 45 min.{% endif %}{% endif %}
+          - type: tile
+            entity: sensor.climate_v2_indoor_temperature
+            name: Indoor (avg)
+            grid_options: {columns: 6}
+          - type: tile
+            entity: sensor.climate_v2_outdoor_temperature
+            name: Outdoor
+            grid_options: {columns: 6}
+          - type: tile
+            entity: sensor.climate_v2_cool_target
+            name: Cool target
+            icon: mdi:snowflake
+            color: blue
+            grid_options: {columns: 6}
+          - type: tile
+            entity: sensor.climate_v2_heat_target
+            name: Heat target
+            icon: mdi:fire
+            color: deep-orange
+            grid_options: {columns: 6}
+          - type: tile
+            entity: sensor.climate_v2_outdoor_high_projected
+            name: High, next few hours
+            icon: mdi:chart-line
+            grid_options: {columns: 6}
+          - type: tile
+            entity: sensor.indoor_humidity
+            name: Humidity
+            grid_options: {columns: 6}
+          - type: tile
+            entity: sensor.indoor_temperature_1
+            name: Indoor sensor 1
+            grid_options: {columns: 6}
+          - type: tile
+            entity: sensor.indoor_temperature_2
+            name: Indoor sensor 2
+            grid_options: {columns: 6}
+      - type: grid
+        cards:
+          - type: heading
+            heading: Weather
+            icon: mdi:weather-partly-cloudy
+          - type: tile
+            entity: weather.forecast_primary
+            name: Forecast
+            features:
+              - type: temperature-forecast
+                forecast_type: hourly
+                hours_to_show: 24
+          - type: tile
+            entity: sensor.outdoor_temperature_local
+            name: Outdoor sensor
+            grid_options: {columns: 6}
+          - type: tile
+            entity: sensor.outdoor_temperature_station
+            name: Weather station
+            grid_options: {columns: 6}
+          - type: heading
+            heading: Decision signals
+            heading_style: subtitle
+          - type: tile
+            entity: binary_sensor.climate_v2_heat_allowed_by_forecast
+            name: Heat allowed by forecast
+            grid_options: {columns: 6}
+          - type: tile
+            entity: binary_sensor.climate_v2_heat_needed
+            name: Heat needed
+            grid_options: {columns: 6}
+          - type: tile
+            entity: binary_sensor.climate_v2_emergency_heat
+            name: Emergency heat
+            grid_options: {columns: 6}
+          - type: tile
+            entity: binary_sensor.climate_v2_too_warm_in_heat
+            name: Too warm in heat
+            grid_options: {columns: 6}
+          - type: tile
+            entity: binary_sensor.climate_v2_warm_day_ahead
+            name: Warm day ahead
+            grid_options: {columns: 6}
+          - type: tile
+            entity: input_datetime.climate_v2_forecast_updated
+            name: Forecast updated
+            grid_options: {columns: 6}
+      - type: grid
+        column_span: 3
+        cards:
+          - type: heading
+            heading: Last 24 hours
+            icon: mdi:chart-timeline-variant
+          - type: history-graph
+            hours_to_show: 24
+            grid_options: {columns: full, rows: 5}
+            entities: &temp_lines
+              - {entity: sensor.climate_v2_indoor_temperature, name: Indoor, color: green}
+              - {entity: sensor.climate_v2_cool_target, name: Cool target, color: blue}
+              - {entity: sensor.climate_v2_heat_target, name: Heat target, color: deep-orange}
+              - {entity: sensor.climate_v2_outdoor_temperature, name: Outdoor, color: grey}
+          - type: history-graph
+            hours_to_show: 24
+            grid_options: {columns: full, rows: 4}
+            entities:
+              - {entity: climate.house_thermostat, name: Thermostat}
+
+  - title: Schedule
+    path: schedule
+    icon: mdi:calendar-clock
+    type: sections
+    max_columns: 2
+    sections:
+      - type: grid
+        cards:
+          - type: heading
+            heading: Cooling (AC) schedule
+            icon: mdi:snowflake
+          - type: entities
+            state_color: false
+            entities:
+              - {type: section, label: "Morning: warm up for the day"}
+              - {entity: input_datetime.climate_cooling_hvac_morning_ramp_up_start_time, name: Start time}
+              - {entity: input_number.climate_cooling_hvac_morning_ramp_up_start_degree, name: Start temp}
+              - {entity: input_datetime.climate_cooling_hvac_morning_ramp_up_mid_time, name: Mid time}
+              - {entity: input_number.climate_cooling_hvac_morning_ramp_up_mid_degree, name: Mid temp}
+              - {entity: input_datetime.climate_cooling_hvac_morning_ramp_up_final_time, name: Day time}
+              - {entity: input_number.climate_cooling_hvac_morning_ramp_up_final_degree, name: Daytime temp}
+              - {type: section, label: "Evening: cool down for sleep"}
+              - {entity: input_datetime.climate_cooling_hvac_evening_ramp_down_start_time, name: Start time}
+              - {entity: input_number.climate_cooling_hvac_evening_ramp_down_start_degree, name: Start temp}
+              - {entity: input_datetime.climate_cooling_hvac_evening_ramp_down_mid_time, name: Mid time}
+              - {entity: input_number.climate_cooling_hvac_evening_ramp_down_mid_degree, name: Mid temp}
+              - {entity: input_datetime.climate_cooling_hvac_evening_ramp_down_final_time, name: Night time}
+              - {entity: input_number.climate_cooling_hvac_evening_ramp_down_final_degree, name: Overnight temp}
+          - type: tile
+            entity: sensor.climate_v2_cool_target
+            name: Cool target right now
+            icon: mdi:snowflake
+            color: blue
+      - type: grid
+        cards:
+          - type: heading
+            heading: Heating schedule
+            icon: mdi:fire
+          - type: entities
+            state_color: false
+            entities:
+              - {type: section, label: "Morning: warm up for the day"}
+              - {entity: input_datetime.climate_heating_hvac_morning_ramp_up_start_time, name: Start time}
+              - {entity: input_number.climate_heating_hvac_morning_ramp_up_start_degree, name: Start temp}
+              - {entity: input_datetime.climate_heating_hvac_morning_ramp_up_mid_time, name: Mid time}
+              - {entity: input_number.climate_heating_hvac_morning_ramp_up_mid_degree, name: Mid temp}
+              - {entity: input_datetime.climate_heating_hvac_morning_ramp_up_final_time, name: Day time}
+              - {entity: input_number.climate_heating_hvac_morning_ramp_up_final_degree, name: Daytime temp}
+              - {type: section, label: "Evening: cool down for sleep"}
+              - {entity: input_datetime.climate_heating_hvac_evening_ramp_down_start_time, name: Start time}
+              - {entity: input_number.climate_heating_hvac_evening_ramp_down_start_degree, name: Start temp}
+              - {entity: input_datetime.climate_heating_hvac_evening_ramp_down_mid_time, name: Mid time}
+              - {entity: input_number.climate_heating_hvac_evening_ramp_down_mid_degree, name: Mid temp}
+              - {entity: input_datetime.climate_heating_hvac_evening_ramp_down_final_time, name: Night time}
+              - {entity: input_number.climate_heating_hvac_evening_ramp_down_final_degree, name: Overnight temp}
+          - type: tile
+            entity: sensor.climate_v2_heat_target
+            name: Heat target right now
+            icon: mdi:fire
+            color: deep-orange
+      - type: grid
+        column_span: 2
+        cards:
+          - type: markdown
+            content: >-
+              **How the schedule works:** each step takes effect at its time and holds until the next step, so the
+              overnight temperature runs until the morning start time. Changes apply within a few minutes. Keep the
+              times in order (start → mid → final) within each block. The heat target can be as close to the cool
+              target as you like; if it is set higher than the cool target, the cool target is used for both.
+
+  - title: Tuning
+    path: tuning
+    icon: mdi:tune-variant
+    type: sections
+    max_columns: 2
+    sections:
+      - type: grid
+        cards:
+          - type: heading
+            heading: When to switch modes
+            icon: mdi:swap-horizontal
+          - type: entities
+            entities:
+              - {type: section, label: "Switching to heat (slow, needs evidence)"}
+              - {entity: input_number.climate_v2_heat_when_below_heat_target_by, name: Heat if house is below heat target by}
+              - {entity: input_number.climate_v2_heat_allowed_if_outdoor_high_at_or_below, name: "…and projected high over the lookahead is at or below"}
+              - {entity: input_number.climate_v2_forecast_lookahead_hours, name: Forecast lookahead}
+              - {entity: input_number.climate_v2_emergency_heat_below_heat_target_by, name: Emergency heat if below heat target by}
+              - {type: section, label: "Switching back to AC (fast)"}
+              - {entity: input_number.climate_v2_leave_heat_above_cool_target_by, name: Back to AC if house is above cool target by}
+              - {type: section, label: Equipment protection}
+              - {entity: input_number.climate_v2_minimum_minutes_between_mode_switches, name: Minimum minutes between switches}
+      - type: grid
+        cards:
+          - type: heading
+            heading: How long each condition must last
+            icon: mdi:timer-sand
+          - type: markdown
+            content: |-
+              These waits are the `delay_on` values on each decision sensor in `packages/swing_season_hvac.yaml`.
+
+              | Condition | Wait |
+              |---|---|
+              | Heat needed | 45 min |
+              | Emergency heat | 15 min |
+              | Too warm in heat | 10 min |
+              | Warm day ahead | 15 min |
+
+              The current forecast rise used for the projected high over the lookahead:
+          - type: tile
+            entity: input_number.climate_v2_forecast_rise_over_lookahead
+            name: Forecast warm-up over lookahead
+            icon: mdi:trending-up
+
+  - title: History
+    path: history
+    icon: mdi:chart-line
+    type: sections
+    max_columns: 1
+    sections:
+      - type: grid
+        cards:
+          - type: heading
+            heading: Temperatures (7 days)
+            icon: mdi:thermometer
+          - type: history-graph
+            hours_to_show: 168
+            grid_options: {columns: full, rows: 6}
+            entities: *temp_lines
+          - type: heading
+            heading: Mode decisions (7 days)
+            icon: mdi:swap-horizontal
+          - type: history-graph
+            hours_to_show: 168
+            grid_options: {columns: full, rows: auto}
+            entities:
+              - {entity: sensor.climate_v2_desired_mode, name: Wanted mode}
+              - {entity: binary_sensor.climate_v2_heat_allowed_by_forecast, name: Heat allowed}
+              - {entity: binary_sensor.climate_v2_heat_needed, name: Heat needed}
+              - {entity: binary_sensor.climate_v2_emergency_heat, name: Emergency heat}
+              - {entity: binary_sensor.climate_v2_too_warm_in_heat, name: Too warm in heat}
+              - {entity: binary_sensor.climate_v2_warm_day_ahead, name: Warm day ahead}
+              - {entity: input_boolean.climate_v2_in_control, name: Automatic control}
+          - type: history-graph
+            hours_to_show: 168
+            grid_options: {columns: full, rows: 5}
+            entities:
+              - {entity: climate.house_thermostat, name: Thermostat}

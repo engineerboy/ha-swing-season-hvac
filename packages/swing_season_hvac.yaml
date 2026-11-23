@@ -1,0 +1,688 @@
+# =============================================================================
+# Swing-Season HVAC for Home Assistant
+# -----------------------------------------------------------------------------
+# Automatic heat <-> AC switching for climates that need both on the same day,
+# with a schedule (morning ramp-up / evening ramp-down) per mode, forecast-aware
+# switching, and a single "writer" automation that verifies every command
+# actually reached the thermostat.
+#
+# INSTALL: see README.md. In short:
+#   1. Enable packages in configuration.yaml:
+#        homeassistant:
+#          packages: !include_dir_named packages
+#   2. Copy this file to /config/packages/
+#   3. Make the entity IDs in "WHAT YOU MUST CHANGE" below match your system
+#   4. Restart, then run script.swing_season_hvac_load_defaults ONCE
+#   5. Turn on input_boolean.climate_v2_in_control when you're ready
+#
+# WHAT YOU MUST CHANGE (find-and-replace, or rename your entities to match):
+#   climate.house_thermostat           -> your thermostat (plain climate entity
+#                                         or a Versatile Thermostat; both work)
+#   sensor.indoor_temperature_1 / _2   -> your indoor temperature sensor(s)
+#   sensor.outdoor_temperature_local   -> your own outdoor sensor
+#   sensor.outdoor_temperature_station -> a second outdoor source (e.g. a nearby
+#                                         weather station); used as a tiebreaker
+#   weather.forecast_primary           -> hourly-forecast weather entity
+#   weather.forecast_backup            -> a second one (fallback)
+#   notify.notify                      -> your notification service
+#
+# Temperatures are in °F. For °C, scale the input_number ranges and defaults.
+# =============================================================================
+
+input_boolean:
+  climate_v2_in_control:
+    name: Climate v2 - in control
+    icon: mdi:thermostat-auto
+  climate_v2_verbose_notifications:
+    name: Climate v2 - verbose notifications
+    icon: mdi:bell-cog
+
+# Tuning settings. No "initial:" on purpose: initial would reset your tuning on
+# every restart. Starting values come from the load-defaults script below.
+input_number:
+  climate_v2_leave_heat_above_cool_target_by:
+    name: Climate v2 - leave heat above cool target by
+    min: 0
+    max: 5
+    step: 0.5
+    unit_of_measurement: "°F"
+    mode: box
+  climate_v2_heat_when_below_heat_target_by:
+    name: Climate v2 - heat when below heat target by
+    min: 0.5
+    max: 6
+    step: 0.5
+    unit_of_measurement: "°F"
+    mode: box
+  climate_v2_emergency_heat_below_heat_target_by:
+    name: Climate v2 - emergency heat below heat target by
+    min: 2
+    max: 10
+    step: 0.5
+    unit_of_measurement: "°F"
+    mode: box
+  climate_v2_heat_allowed_if_outdoor_high_at_or_below:
+    name: Climate v2 - heat allowed if outdoor high at or below
+    min: 40
+    max: 90
+    step: 1
+    unit_of_measurement: "°F"
+    mode: box
+  climate_v2_forecast_lookahead_hours:
+    name: Climate v2 - forecast lookahead hours
+    min: 1
+    max: 24
+    step: 1
+    unit_of_measurement: h
+    mode: box
+  climate_v2_minimum_minutes_between_mode_switches:
+    name: Climate v2 - minimum minutes between mode switches
+    min: 0
+    max: 240
+    step: 5
+    unit_of_measurement: min
+    mode: box
+  climate_v2_forecast_rise_over_lookahead:
+    # Written by the forecast automation; not a user setting.
+    name: Climate v2 - forecast rise over lookahead
+    min: -40
+    max: 40
+    step: 0.1
+    unit_of_measurement: "°F"
+    mode: box
+
+  # --- Schedule temperatures: 3 morning steps + 3 evening steps per mode ---
+  climate_cooling_hvac_morning_ramp_up_start_degree: &sched_temp
+    name: Cooling - morning start temp
+    min: 60
+    max: 80
+    step: 1
+    unit_of_measurement: "°F"
+    mode: box
+  climate_cooling_hvac_morning_ramp_up_mid_degree:
+    <<: *sched_temp
+    name: Cooling - morning mid temp
+  climate_cooling_hvac_morning_ramp_up_final_degree:
+    <<: *sched_temp
+    name: Cooling - daytime temp
+  climate_cooling_hvac_evening_ramp_down_start_degree:
+    <<: *sched_temp
+    name: Cooling - evening start temp
+  climate_cooling_hvac_evening_ramp_down_mid_degree:
+    <<: *sched_temp
+    name: Cooling - evening mid temp
+  climate_cooling_hvac_evening_ramp_down_final_degree:
+    <<: *sched_temp
+    name: Cooling - overnight temp
+  climate_heating_hvac_morning_ramp_up_start_degree:
+    <<: *sched_temp
+    name: Heating - morning start temp
+  climate_heating_hvac_morning_ramp_up_mid_degree:
+    <<: *sched_temp
+    name: Heating - morning mid temp
+  climate_heating_hvac_morning_ramp_up_final_degree:
+    <<: *sched_temp
+    name: Heating - daytime temp
+  climate_heating_hvac_evening_ramp_down_start_degree:
+    <<: *sched_temp
+    name: Heating - evening start temp
+  climate_heating_hvac_evening_ramp_down_mid_degree:
+    <<: *sched_temp
+    name: Heating - evening mid temp
+  climate_heating_hvac_evening_ramp_down_final_degree:
+    <<: *sched_temp
+    name: Heating - overnight temp
+
+input_datetime:
+  climate_v2_last_mode_switch:
+    name: Climate v2 - last mode switch
+    has_date: true
+    has_time: true
+  climate_v2_forecast_updated:
+    name: Climate v2 - forecast updated
+    has_date: true
+    has_time: true
+
+  # --- Schedule times ---
+  climate_cooling_hvac_morning_ramp_up_start_time:
+    name: Cooling - morning start time
+    has_time: true
+  climate_cooling_hvac_morning_ramp_up_mid_time:
+    name: Cooling - morning mid time
+    has_time: true
+  climate_cooling_hvac_morning_ramp_up_final_time:
+    name: Cooling - daytime start
+    has_time: true
+  climate_cooling_hvac_evening_ramp_down_start_time:
+    name: Cooling - evening start time
+    has_time: true
+  climate_cooling_hvac_evening_ramp_down_mid_time:
+    name: Cooling - evening mid time
+    has_time: true
+  climate_cooling_hvac_evening_ramp_down_final_time:
+    name: Cooling - overnight start
+    has_time: true
+  climate_heating_hvac_morning_ramp_up_start_time:
+    name: Heating - morning start time
+    has_time: true
+  climate_heating_hvac_morning_ramp_up_mid_time:
+    name: Heating - morning mid time
+    has_time: true
+  climate_heating_hvac_morning_ramp_up_final_time:
+    name: Heating - daytime start
+    has_time: true
+  climate_heating_hvac_evening_ramp_down_start_time:
+    name: Heating - evening start time
+    has_time: true
+  climate_heating_hvac_evening_ramp_down_mid_time:
+    name: Heating - evening mid time
+    has_time: true
+  climate_heating_hvac_evening_ramp_down_final_time:
+    name: Heating - overnight start
+    has_time: true
+
+template:
+  - sensor:
+      # Average of the indoor sensors that have reported recently. Each entry is
+      # [entity, max age in hours]: sensors that only report on change (common
+      # for Zigbee) need a longer max age.
+      - name: Climate v2 - indoor temperature
+        unique_id: swing_hvac_indoor_temperature
+        unit_of_measurement: "°F"
+        device_class: temperature
+        state_class: measurement
+        state: >-
+          {% set sensors = [['sensor.indoor_temperature_1', 6], ['sensor.indoor_temperature_2', 2]] %}
+          {% set ns = namespace(v=[]) %}
+          {% for e, hrs in sensors %}{% set s = states[e.split('.')[0]][e.split('.')[1]] %}
+          {% if s and is_number(s.state) and (now() - s.last_reported) < timedelta(hours=hrs) %}{% set ns.v = ns.v + [s.state | float] %}{% endif %}
+          {% endfor %}
+          {{ (ns.v | sum / ns.v | length) | round(1) if ns.v | length > 0 else none }}
+        availability: >-
+          {% set sensors = [['sensor.indoor_temperature_1', 6], ['sensor.indoor_temperature_2', 2]] %}
+          {% set ns = namespace(ok=false) %}
+          {% for e, hrs in sensors %}{% set s = states[e.split('.')[0]][e.split('.')[1]] %}
+          {% if s and is_number(s.state) and (now() - s.last_reported) < timedelta(hours=hrs) %}{% set ns.ok = true %}{% endif %}
+          {% endfor %}
+          {{ ns.ok }}
+
+      # Outdoor: your own sensor wins unless it disagrees with the station by
+      # more than 5°F, in which case the median of the three sources wins.
+      - name: Climate v2 - outdoor temperature
+        unique_id: swing_hvac_outdoor_temperature
+        unit_of_measurement: "°F"
+        device_class: temperature
+        state_class: measurement
+        state: >-
+          {% set z = states.sensor.outdoor_temperature_local %}
+          {% set a = states.sensor.outdoor_temperature_station %}
+          {% set zv = z.state | float if z and is_number(z.state) and (now() - z.last_reported) < timedelta(hours=3) else none %}
+          {% set av = a.state | float if a and is_number(a.state) and (now() - a.last_reported) < timedelta(minutes=30) else none %}
+          {% set nv = state_attr('weather.forecast_primary', 'temperature') %}
+          {% set nv = nv | float if is_number(nv) else none %}
+          {% if zv is not none and (av is none or (zv - av) | abs <= 5) %}{% set out = zv %}
+          {% elif zv is none and av is not none %}{% set out = av %}
+          {% else %}{% set l = [zv, av, nv] | reject('none') | list | sort %}
+          {% set out = l[1] if l | length == 3 else (l | sum / l | length if l | length > 0 else none) %}{% endif %}
+          {{ out | round(1) if out is not none else none }}
+
+      # Current scheduled targets: the most recent step at or before now; before
+      # the first step of the day, yesterday's last step still applies.
+      - name: Climate v2 - cool target
+        unique_id: swing_hvac_cool_target
+        unit_of_measurement: "°F"
+        device_class: temperature
+        state_class: measurement
+        state: >-
+          {% set pts = ['morning_ramp_up_start','morning_ramp_up_mid','morning_ramp_up_final','evening_ramp_down_start','evening_ramp_down_mid','evening_ramp_down_final'] %}
+          {% set ns = namespace(best=none, bt=none, last=none, lt=none) %}
+          {% for p in pts %}{% set t = today_at(states('input_datetime.climate_cooling_hvac_' ~ p ~ '_time')) %}
+          {% set d = states('input_number.climate_cooling_hvac_' ~ p ~ '_degree') %}
+          {% if is_number(d) %}
+          {% if t <= now() and (ns.bt is none or t > ns.bt) %}{% set ns.best = d | float %}{% set ns.bt = t %}{% endif %}
+          {% if ns.lt is none or t > ns.lt %}{% set ns.last = d | float %}{% set ns.lt = t %}{% endif %}
+          {% endif %}{% endfor %}
+          {{ ns.best if ns.best is not none else ns.last }}
+
+      # Heat target is capped at the cool target, so the two can never fight.
+      - name: Climate v2 - heat target
+        unique_id: swing_hvac_heat_target
+        unit_of_measurement: "°F"
+        device_class: temperature
+        state_class: measurement
+        state: >-
+          {% set pts = ['morning_ramp_up_start','morning_ramp_up_mid','morning_ramp_up_final','evening_ramp_down_start','evening_ramp_down_mid','evening_ramp_down_final'] %}
+          {% set ns = namespace(best=none, bt=none, last=none, lt=none) %}
+          {% for p in pts %}{% set t = today_at(states('input_datetime.climate_heating_hvac_' ~ p ~ '_time')) %}
+          {% set d = states('input_number.climate_heating_hvac_' ~ p ~ '_degree') %}
+          {% if is_number(d) %}
+          {% if t <= now() and (ns.bt is none or t > ns.bt) %}{% set ns.best = d | float %}{% set ns.bt = t %}{% endif %}
+          {% if ns.lt is none or t > ns.lt %}{% set ns.last = d | float %}{% set ns.lt = t %}{% endif %}
+          {% endif %}{% endfor %}
+          {% set heat = ns.best if ns.best is not none else ns.last %}
+          {% set cool = states('sensor.climate_v2_cool_target') %}
+          {{ [heat, cool | float] | min if heat is not none and is_number(cool) else heat }}
+
+      # Local outdoor temp + the forecast's rise over the lookahead window.
+      # The forecast supplies the trend, your own sensors supply the level.
+      - name: Climate v2 - outdoor high projected
+        unique_id: swing_hvac_outdoor_high_projected
+        unit_of_measurement: "°F"
+        device_class: temperature
+        state_class: measurement
+        state: >-
+          {% set o = states('sensor.climate_v2_outdoor_temperature') %}
+          {% set ts = state_attr('input_datetime.climate_v2_forecast_updated', 'timestamp') %}
+          {% set fresh = ts is number and (now().timestamp() - ts) < 10800 %}
+          {% set rise = states('input_number.climate_v2_forecast_rise_over_lookahead') | float(0) if fresh else 0 %}
+          {{ (o | float + [rise, 0] | max) | round(1) if is_number(o) else none }}
+
+      # The decision. Cool is the default; leaving it needs evidence.
+      - name: Climate v2 - desired mode
+        unique_id: swing_hvac_desired_mode
+        state: >-
+          {% set cur = states('climate.house_thermostat') %}
+          {% set heat_now = is_state('binary_sensor.climate_v2_heat_needed', 'on') or is_state('binary_sensor.climate_v2_emergency_heat', 'on') %}
+          {% set cool_now = is_state('binary_sensor.climate_v2_too_warm_in_heat', 'on') or is_state('binary_sensor.climate_v2_warm_day_ahead', 'on') %}
+          {% if cur == 'heat' %}{{ 'cool' if cool_now else 'heat' }}{% else %}{{ 'heat' if heat_now else 'cool' }}{% endif %}
+
+  - binary_sensor:
+      - name: Climate v2 - heat allowed by forecast
+        unique_id: swing_hvac_heat_allowed_by_forecast
+        state: >-
+          {% set p = states('sensor.climate_v2_outdoor_high_projected') %}
+          {% set lim = states('input_number.climate_v2_heat_allowed_if_outdoor_high_at_or_below') %}
+          {{ is_number(p) and is_number(lim) and p | float <= lim | float }}
+
+      - name: Climate v2 - heat needed
+        unique_id: swing_hvac_heat_needed
+        delay_on:
+          minutes: 45
+        state: >-
+          {% set i = states('sensor.climate_v2_indoor_temperature') %}
+          {% set t = states('sensor.climate_v2_heat_target') %}
+          {% set off = states('input_number.climate_v2_heat_when_below_heat_target_by') %}
+          {{ is_number(i) and is_number(t) and is_number(off) and i | float <= t | float - off | float
+             and is_state('binary_sensor.climate_v2_heat_allowed_by_forecast', 'on') }}
+
+      - name: Climate v2 - emergency heat
+        unique_id: swing_hvac_emergency_heat
+        delay_on:
+          minutes: 15
+        state: >-
+          {% set i = states('sensor.climate_v2_indoor_temperature') %}
+          {% set t = states('sensor.climate_v2_heat_target') %}
+          {% set off = states('input_number.climate_v2_emergency_heat_below_heat_target_by') %}
+          {{ is_number(i) and is_number(t) and is_number(off) and i | float <= t | float - off | float }}
+
+      # Ignores heating overshoot: only counts while the heat isn't running.
+      - name: Climate v2 - too warm in heat
+        unique_id: swing_hvac_too_warm_in_heat
+        delay_on:
+          minutes: 10
+        state: >-
+          {% set i = states('sensor.climate_v2_indoor_temperature') %}
+          {% set t = states('sensor.climate_v2_cool_target') %}
+          {% set off = states('input_number.climate_v2_leave_heat_above_cool_target_by') %}
+          {{ is_number(i) and is_number(t) and is_number(off) and i | float >= t | float + off | float
+             and not is_state_attr('climate.house_thermostat', 'hvac_action', 'heating') }}
+
+      - name: Climate v2 - warm day ahead
+        unique_id: swing_hvac_warm_day_ahead
+        delay_on:
+          minutes: 15
+        state: >-
+          {% set i = states('sensor.climate_v2_indoor_temperature') %}
+          {% set t = states('sensor.climate_v2_heat_target') %}
+          {{ is_number(i) and is_number(t) and i | float >= t | float
+             and is_state('binary_sensor.climate_v2_heat_allowed_by_forecast', 'off') }}
+
+script:
+  swing_season_hvac_load_defaults:
+    alias: Swing-season HVAC - load default settings
+    description: >-
+      Run once after installing. Sets the tuning settings and a sample schedule.
+      Running it again overwrites your changes.
+    sequence:
+      - action: input_number.set_value
+        target: {entity_id: input_number.climate_v2_leave_heat_above_cool_target_by}
+        data: {value: 1}
+      - action: input_number.set_value
+        target: {entity_id: input_number.climate_v2_heat_when_below_heat_target_by}
+        data: {value: 2}
+      - action: input_number.set_value
+        target: {entity_id: input_number.climate_v2_emergency_heat_below_heat_target_by}
+        data: {value: 4}
+      - action: input_number.set_value
+        target: {entity_id: input_number.climate_v2_heat_allowed_if_outdoor_high_at_or_below}
+        data: {value: 72}
+      - action: input_number.set_value
+        target: {entity_id: input_number.climate_v2_forecast_lookahead_hours}
+        data: {value: 6}
+      - action: input_number.set_value
+        target: {entity_id: input_number.climate_v2_minimum_minutes_between_mode_switches}
+        data: {value: 20}
+      - action: input_datetime.set_datetime
+        target: {entity_id: input_datetime.climate_v2_last_mode_switch}
+        data: {datetime: "{{ (now() - timedelta(days=1)).strftime('%Y-%m-%d %H:%M:%S') }}"}
+      # Sample schedule. Morning: warm up for the day. Evening: cool down for sleep.
+      - repeat:
+          for_each:
+            - {p: morning_ramp_up_start, time: "06:00:00", cool: 74, heat: 67}
+            - {p: morning_ramp_up_mid, time: "07:00:00", cool: 73, heat: 68}
+            - {p: morning_ramp_up_final, time: "08:00:00", cool: 72, heat: 69}
+            - {p: evening_ramp_down_start, time: "20:00:00", cool: 71, heat: 68}
+            - {p: evening_ramp_down_mid, time: "21:00:00", cool: 70, heat: 67}
+            - {p: evening_ramp_down_final, time: "22:00:00", cool: 69, heat: 66}
+          sequence:
+            - action: input_datetime.set_datetime
+              target:
+                entity_id:
+                  - "input_datetime.climate_cooling_hvac_{{ repeat.item.p }}_time"
+                  - "input_datetime.climate_heating_hvac_{{ repeat.item.p }}_time"
+              data: {time: "{{ repeat.item.time }}"}
+            - action: input_number.set_value
+              target: {entity_id: "input_number.climate_cooling_hvac_{{ repeat.item.p }}_degree"}
+              data: {value: "{{ repeat.item.cool }}"}
+            - action: input_number.set_value
+              target: {entity_id: "input_number.climate_heating_hvac_{{ repeat.item.p }}_degree"}
+              data: {value: "{{ repeat.item.heat }}"}
+
+automation:
+  - id: swing_season_hvac_update_forecast_outlook
+    alias: Climate v2 - update forecast outlook
+    description: >-
+      Every 30 min: pulls the hourly forecast (primary, with a backup) and stores
+      how much warmer it will get over the lookahead window, relative to the
+      forecast for right now.
+    triggers:
+      - trigger: time_pattern
+        minutes: /30
+      - trigger: homeassistant
+        event: start
+    actions:
+      - action: weather.get_forecasts
+        continue_on_error: true
+        target: {entity_id: weather.forecast_primary}
+        data: {type: hourly}
+        response_variable: primary
+      - action: weather.get_forecasts
+        continue_on_error: true
+        target: {entity_id: weather.forecast_backup}
+        data: {type: hourly}
+        response_variable: backup
+      - variables:
+          hours: "{{ states('input_number.climate_v2_forecast_lookahead_hours') | int(6) }}"
+          primary_temps: >-
+            {{ (primary['weather.forecast_primary'].forecast | map(attribute='temperature') | select('number') | list)
+               if primary is defined and primary else [] }}
+          backup_temps: >-
+            {{ (backup['weather.forecast_backup'].forecast | map(attribute='temperature') | select('number') | list)
+               if backup is defined and backup else [] }}
+      - variables:
+          temps: "{{ (primary_temps if primary_temps | length > 1 else backup_temps)[: hours + 1] }}"
+      - if:
+          - condition: template
+            value_template: "{{ temps | length > 1 }}"
+        then:
+          - action: input_number.set_value
+            target: {entity_id: input_number.climate_v2_forecast_rise_over_lookahead}
+            data:
+              value: "{{ [[(temps | max) - temps[0], 40] | min, -40] | max | round(1) }}"
+          - action: input_datetime.set_datetime
+            target: {entity_id: input_datetime.climate_v2_forecast_updated}
+            data:
+              datetime: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }}"
+    mode: single
+
+  - id: swing_season_hvac_apply
+    alias: Climate v2 - apply HVAC mode and setpoint
+    description: >-
+      The ONLY automation that writes to the thermostat. Does nothing unless
+      'Climate v2 - in control' is on. Applies the desired mode (respecting the
+      minimum time between switches, except for emergency heat) and keeps the
+      setpoint matched to the schedule. Re-checks every 5 minutes and at startup.
+      Every command is verified against the physical thermostat and re-sent once
+      if it did not take.
+    triggers:
+      - trigger: state
+        entity_id: sensor.climate_v2_desired_mode
+      - trigger: state
+        entity_id:
+          - sensor.climate_v2_heat_target
+          - sensor.climate_v2_cool_target
+      - trigger: state
+        entity_id: input_boolean.climate_v2_in_control
+        to: "on"
+      - trigger: homeassistant
+        event: start
+      - trigger: time_pattern
+        minutes: /5
+      - trigger: state
+        entity_id: climate.house_thermostat
+        attribute: preset_mode
+      - trigger: state
+        entity_id: climate.house_thermostat
+        to: "off"
+    conditions:
+      - condition: state
+        entity_id: input_boolean.climate_v2_in_control
+        state: "on"
+      - condition: state
+        entity_id: sensor.climate_v2_desired_mode
+        state: ["heat", "cool"]
+      - condition: not
+        conditions:
+          - condition: state
+            entity_id: climate.house_thermostat
+            state: ["unavailable", "unknown"]
+    actions:
+      - variables:
+          current: "{{ states('climate.house_thermostat') }}"
+          desired: "{{ states('sensor.climate_v2_desired_mode') }}"
+          emergency: "{{ is_state('binary_sensor.climate_v2_emergency_heat', 'on') }}"
+          last_ts: "{{ state_attr('input_datetime.climate_v2_last_mode_switch', 'timestamp') | float(0) }}"
+          min_seconds: "{{ states('input_number.climate_v2_minimum_minutes_between_mode_switches') | float(20) * 60 }}"
+          # If the thermostat is a Versatile Thermostat, this is the physical
+          # thermostat underneath it; otherwise empty, and everything is checked
+          # against climate.house_thermostat directly.
+          device: "{% set u = (state_attr('climate.house_thermostat', 'vtherm_over_climate') or {}).get('underlying_entities', []) %}{{ u[0] if u | count == 1 else '' }}"
+      - variables:
+          dwell_ok: "{{ emergency or (now().timestamp() - last_ts) >= min_seconds }}"
+          target: "{{ states('sensor.climate_v2_heat_target' if desired == 'heat' else 'sensor.climate_v2_cool_target') }}"
+          why: >-
+            {% if emergency %}emergency heat (house well below heat target)
+            {% elif is_state('binary_sensor.climate_v2_heat_needed', 'on') %}house below heat target and no warm-up forecast
+            {% elif is_state('binary_sensor.climate_v2_too_warm_in_heat', 'on') %}house above cool target while in heat
+            {% elif is_state('binary_sensor.climate_v2_warm_day_ahead', 'on') %}warm-up forecast, heat no longer needed
+            {% else %}restoring {{ desired }} (was {{ current }}){% endif %}
+          device_was: "{{ states(device) if device else 'unknown' }}"
+          recovering: "{{ current not in ['heat', 'cool'] }}"
+          check_entity: "{{ device if device else 'climate.house_thermostat' }}"
+      - choose:
+          - alias: Switch mode
+            conditions:
+              - condition: template
+                value_template: "{{ desired != current and (dwell_ok or current not in ['heat', 'cool']) }}"
+            sequence:
+              - alias: Set mode and setpoint (verify, retry once)
+                repeat:
+                  sequence:
+                    - action: climate.set_hvac_mode
+                      continue_on_error: true
+                      target: {entity_id: climate.house_thermostat}
+                      data: {hvac_mode: "{{ desired }}"}
+                    # Some thermostats (Nest) reject a setpoint while still
+                    # switching mode, so the temperature must follow the mode.
+                    - alias: Wait up to 30 s for the thermostat to finish switching mode
+                      wait_template: "{{ is_state(check_entity, desired) }}"
+                      timeout: {seconds: 30}
+                      continue_on_timeout: true
+                    - if:
+                        - condition: template
+                          value_template: "{{ is_number(target) }}"
+                      then:
+                        - action: climate.set_temperature
+                          continue_on_error: true
+                          target: {entity_id: climate.house_thermostat}
+                          data: {temperature: "{{ target | float }}"}
+                        - alias: On the retry, send the setpoint straight to the device
+                          if:
+                            - condition: template
+                              value_template: "{{ repeat.index > 1 and device != '' }}"
+                          then:
+                            - action: climate.set_temperature
+                              continue_on_error: true
+                              target: {entity_id: "{{ device }}"}
+                              data: {temperature: "{{ target | float }}"}
+                    - alias: Wait up to 60 s for the thermostat to report the change
+                      wait_template: >-
+                        {{ is_state(check_entity, desired) and (not is_number(target)
+                           or (state_attr(check_entity, 'temperature') | float(-999) - target | float) | abs < 0.5) }}
+                      timeout: {seconds: 60}
+                      continue_on_timeout: true
+                  until:
+                    - condition: template
+                      value_template: >-
+                        {{ (is_state(check_entity, desired) and (not is_number(target)
+                           or (state_attr(check_entity, 'temperature') | float(-999) - target | float) | abs < 0.5))
+                           or repeat.index >= 2 }}
+              - alias: Count it as a mode switch only if it was a real heat/cool change
+                if:
+                  - condition: template
+                    value_template: "{{ not recovering }}"
+                then:
+                  - action: input_datetime.set_datetime
+                    target: {entity_id: input_datetime.climate_v2_last_mode_switch}
+                    data: {datetime: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }}"}
+              - condition: template
+                value_template: "{{ is_number(target) }}"
+              - action: notify.notify
+                continue_on_error: true
+                data:
+                  message: >-
+                    {% if recovering %}Thermostat came back as '{{ current }}' (usually after a restart); set it back to
+                    {{ desired }} at {{ target }}°F.{% if device %} {{ state_attr(device, 'friendly_name') or device }} itself was
+                    {{ device_was }}{{ ' the whole time, so heating/cooling was not interrupted.' if device_was == desired else '.' }}{% endif %}
+                    {% else %}HVAC switched {{ current }} → {{ desired }} at {{ target }}°F: {{ why | trim }}.
+                    Indoor {{ states('sensor.climate_v2_indoor_temperature') }}°F, outdoor
+                    {{ states('sensor.climate_v2_outdoor_temperature') }}°F, projected high over the next
+                    {{ states('input_number.climate_v2_forecast_lookahead_hours') | int }} h
+                    {{ states('sensor.climate_v2_outdoor_high_projected') }}°F.{% endif %}
+
+          - alias: Undo preset
+            conditions:
+              - condition: template
+                value_template: >-
+                  {{ desired == current and is_number(target)
+                     and (state_attr('climate.house_thermostat', 'preset_mode') or 'none') not in ['none', 'safety', 'power'] }}
+            sequence:
+              - variables:
+                  preset: "{{ state_attr('climate.house_thermostat', 'preset_mode') }}"
+              - alias: Clear preset and restore setpoint (verify, retry once)
+                repeat:
+                  sequence:
+                    - action: climate.set_preset_mode
+                      continue_on_error: true
+                      target: {entity_id: climate.house_thermostat}
+                      data: {preset_mode: none}
+                    - action: climate.set_temperature
+                      continue_on_error: true
+                      target: {entity_id: climate.house_thermostat}
+                      data: {temperature: "{{ target | float }}"}
+                    - wait_template: "{{ (state_attr(check_entity, 'temperature') | float(-999) - target | float) | abs < 0.5 }}"
+                      timeout: {seconds: 60}
+                      continue_on_timeout: true
+                  until:
+                    - condition: template
+                      value_template: >-
+                        {{ (state_attr(check_entity, 'temperature') | float(-999) - target | float) | abs < 0.5
+                           or repeat.index >= 2 }}
+              - action: notify.notify
+                continue_on_error: true
+                data:
+                  message: >-
+                    Thermostat preset '{{ preset }}' was selected; cleared it and restored the scheduled
+                    {{ 'AC' if current == 'cool' else 'heat' }} setpoint of {{ target | float | round(0) | int }}°F.
+                    Turn off automatic control to use presets manually.
+
+          # Versatile Thermostat only: VT does not retry a failed command (e.g. a
+          # cloud API error), so it can believe a setpoint is applied while the
+          # physical thermostat never got it.
+          - alias: Resync device
+            conditions:
+              - condition: template
+                value_template: >-
+                  {% set lc = (state_attr('climate.house_thermostat', 'specific_states') or {}).get('last_change_time_from_vtherm') %}
+                  {{ device != '' and desired == current and is_number(target) and is_state(device, current)
+                     and (state_attr('climate.house_thermostat', 'temperature') | float(0) - target | float) | abs < 0.5
+                     and (state_attr(device, 'temperature') | float(0) - target | float) | abs >= 0.5
+                     and (lc is none or (now() - as_datetime(lc)).total_seconds() > 120) }}
+            sequence:
+              - variables:
+                  device_temp: "{{ state_attr(device, 'temperature') }}"
+              - repeat:
+                  sequence:
+                    - action: climate.set_temperature
+                      continue_on_error: true
+                      target: {entity_id: "{{ device }}"}
+                      data: {temperature: "{{ target | float }}"}
+                    - wait_template: "{{ (state_attr(device, 'temperature') | float(-999) - target | float) | abs < 0.5 }}"
+                      timeout: {seconds: 60}
+                      continue_on_timeout: true
+                  until:
+                    - condition: template
+                      value_template: >-
+                        {{ (state_attr(device, 'temperature') | float(-999) - target | float) | abs < 0.5
+                           or repeat.index >= 2 }}
+              - action: notify.notify
+                continue_on_error: true
+                data:
+                  message: >-
+                    {{ state_attr(device, 'friendly_name') or device }} was at {{ device_temp }}°F instead of the
+                    scheduled {{ target | float | round(0) | int }}°F (an earlier command didn't reach it).
+                    Re-sent; will keep checking every 5 minutes.
+
+          - alias: Same mode, fix setpoint
+            conditions:
+              - condition: template
+                value_template: >-
+                  {{ desired == current and is_number(target)
+                     and (state_attr('climate.house_thermostat', 'temperature') | float(0) - target | float) | abs >= 0.5 }}
+            sequence:
+              - variables:
+                  old_temp: "{{ state_attr('climate.house_thermostat', 'temperature') }}"
+                  scheduled: >-
+                    {{ trigger is defined and trigger.platform == 'state'
+                       and trigger.entity_id in ['sensor.climate_v2_heat_target', 'sensor.climate_v2_cool_target'] }}
+              - repeat:
+                  sequence:
+                    - action: climate.set_temperature
+                      continue_on_error: true
+                      target: {entity_id: climate.house_thermostat}
+                      data: {temperature: "{{ target | float }}"}
+                    - wait_template: "{{ (state_attr(check_entity, 'temperature') | float(-999) - target | float) | abs < 0.5 }}"
+                      timeout: {seconds: 60}
+                      continue_on_timeout: true
+                  until:
+                    - condition: template
+                      value_template: >-
+                        {{ (state_attr(check_entity, 'temperature') | float(-999) - target | float) | abs < 0.5
+                           or repeat.index >= 2 }}
+              - if:
+                  - condition: state
+                    entity_id: input_boolean.climate_v2_verbose_notifications
+                    state: "on"
+                then:
+                  - action: notify.notify
+                    continue_on_error: true
+                    data:
+                      message: >-
+                        {{ 'AC' if current == 'cool' else 'Heat' }} setpoint {{ old_temp }} →
+                        {{ target | float | round(0) | int }}°F:
+                        {{ 'scheduled step' if scheduled else 'correction, thermostat was not at the scheduled temperature' }}.
+                        Indoor {{ states('sensor.climate_v2_indoor_temperature') }}°F.
+    mode: queued
+    max: 10
+    trace:
+      stored_traces: 40
