@@ -26,7 +26,9 @@ Automatic heat ↔ AC switching for climates where you can need **both on the sa
 
 Most thermostats' "auto" (heat/cool) modes assume real seasons: they want a wide gap between the heat and cool setpoints, and in practice they let the house drift several degrees before switching. In a climate where you can run the AC on New Year's Day and the heat on a spring morning, that means someone in the house is constantly feathering the thermostat by hand. This package does that job.
 
-<!-- Screenshots: add sanitized images to docs/ and reference them here, e.g. ![Control tab](docs/control.png) -->
+![Control tab: thermostat, "what it's doing and why", decision signals, and the last 24 hours](docs/control.jpg)
+
+More screenshots: [Screenshots](#screenshots).
 
 ## How it decides
 
@@ -132,6 +134,20 @@ Things worth knowing:
 - Room sensors in each main room, with fan-only circulation when the spread between rooms gets too large.
 - Self-regulation so the *room average* reaches the target instead of the thermostat's own sensor.
 - Supply/return air temperature probes for equipment health.
+
+## Screenshots
+
+**History:** a week of indoor temperature against the schedule, what the automation wanted and why, and what the thermostat actually did.
+
+![History tab](docs/history.jpg)
+
+**Schedule:** morning ramp-up and evening ramp-down, separately for AC and heat.
+
+![Schedule tab](docs/schedule.jpg)
+
+**Tuning:** switching thresholds. These are my own settings after a few weeks, not the package defaults. (Mine runs as UI helpers, so its wait-time note differs slightly from the packaged dashboard.)
+
+![Tuning tab](docs/tuning.jpg)
 
 ## Disclaimer
 
