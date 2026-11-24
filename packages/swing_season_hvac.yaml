@@ -505,6 +505,34 @@ automation:
               - condition: template
                 value_template: "{{ desired != current and (dwell_ok or current not in ['heat', 'cool']) }}"
             sequence:
+              # Recorded before the verify wait so a Home Assistant restart mid-run
+              # cannot skip it. Manual heat/cool changes are recorded by the
+              # "record mode switches" automation below.
+              - alias: Count it as a mode switch only if it was a real heat/cool change
+                if:
+                  - condition: template
+                    value_template: "{{ not recovering }}"
+                then:
+                  - action: input_datetime.set_datetime
+                    target: {entity_id: input_datetime.climate_v2_last_mode_switch}
+                    data: {datetime: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }}"}
+              - alias: Notify (before the verify wait so a restart cannot skip it)
+                if:
+                  - condition: template
+                    value_template: "{{ is_number(target) }}"
+                then:
+                  - action: notify.notify
+                    continue_on_error: true
+                    data:
+                      message: >-
+                        {% if recovering %}Thermostat came back as '{{ current }}' (usually after a restart); set it back to
+                        {{ desired }} at {{ target }}°F.{% if device %} {{ state_attr(device, 'friendly_name') or device }} itself was
+                        {{ device_was }}{{ ' the whole time, so heating/cooling was not interrupted.' if device_was == desired else '.' }}{% endif %}
+                        {% else %}HVAC switched {{ current }} → {{ desired }} at {{ target }}°F: {{ why | trim }}.
+                        Indoor {{ states('sensor.climate_v2_indoor_temperature') }}°F, outdoor
+                        {{ states('sensor.climate_v2_outdoor_temperature') }}°F, projected high over the next
+                        {{ states('input_number.climate_v2_forecast_lookahead_hours') | int }} h
+                        {{ states('sensor.climate_v2_outdoor_high_projected') }}°F.{% endif %}
               - alias: Set mode and setpoint (verify, retry once)
                 repeat:
                   sequence:
@@ -547,28 +575,6 @@ automation:
                         {{ (is_state(check_entity, desired) and (not is_number(target)
                            or (state_attr(check_entity, 'temperature') | float(-999) - target | float) | abs < 0.5))
                            or repeat.index >= 2 }}
-              - alias: Count it as a mode switch only if it was a real heat/cool change
-                if:
-                  - condition: template
-                    value_template: "{{ not recovering }}"
-                then:
-                  - action: input_datetime.set_datetime
-                    target: {entity_id: input_datetime.climate_v2_last_mode_switch}
-                    data: {datetime: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }}"}
-              - condition: template
-                value_template: "{{ is_number(target) }}"
-              - action: notify.notify
-                continue_on_error: true
-                data:
-                  message: >-
-                    {% if recovering %}Thermostat came back as '{{ current }}' (usually after a restart); set it back to
-                    {{ desired }} at {{ target }}°F.{% if device %} {{ state_attr(device, 'friendly_name') or device }} itself was
-                    {{ device_was }}{{ ' the whole time, so heating/cooling was not interrupted.' if device_was == desired else '.' }}{% endif %}
-                    {% else %}HVAC switched {{ current }} → {{ desired }} at {{ target }}°F: {{ why | trim }}.
-                    Indoor {{ states('sensor.climate_v2_indoor_temperature') }}°F, outdoor
-                    {{ states('sensor.climate_v2_outdoor_temperature') }}°F, projected high over the next
-                    {{ states('input_number.climate_v2_forecast_lookahead_hours') | int }} h
-                    {{ states('sensor.climate_v2_outdoor_high_projected') }}°F.{% endif %}
 
           - alias: Undo preset
             conditions:
@@ -686,3 +692,21 @@ automation:
     max: 10
     trace:
       stored_traces: 40
+
+  # Records every direct heat <-> cool change, whoever made it (this package,
+  # the dashboard, the thermostat's own app or the wall unit), so a manual
+  # change also starts the minimum time between automatic switches.
+  # Changes to or from off/unavailable (e.g. restarts) are not counted.
+  - id: swing_season_hvac_record_mode_switches
+    alias: Climate v2 - record mode switches
+    triggers:
+      - trigger: state
+        entity_id: climate.house_thermostat
+        from: [heat, cool]
+        to: [heat, cool]
+    actions:
+      - action: input_datetime.set_datetime
+        target: {entity_id: input_datetime.climate_v2_last_mode_switch}
+        data: {timestamp: "{{ now().timestamp() }}"}
+    mode: queued
+    max: 5

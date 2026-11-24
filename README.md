@@ -121,12 +121,14 @@ Things worth knowing:
 | The decision | `sensor.climate_v2_desired_mode` |
 | Forecast updater | `automation.climate_v2_update_forecast_outlook` (every 30 min) |
 | The only writer | `automation.climate_v2_apply_hvac_mode_and_setpoint` |
+| Switch recorder | `automation.climate_v2_record_mode_switches` (stamps every heat/cool change, manual ones included) |
 
 ## Lessons learned the hard way
 
 - **Cloud thermostats drop commands.** A Google Nest API error once left the thermostat 2°F off schedule all night while Home Assistant showed the right value. Hence verify-and-retry, and comparing against the physical thermostat rather than any layer above it.
 - **Order matters on a mode switch.** Sending the mode and temperature together made the Nest reject the temperature (still in heat), and it cooled to the old heat setpoint. Now the temperature waits for the mode to confirm.
 - **Restarts briefly report "off".** Without the immediate restore, that looked like the system turning itself off.
+- **A restart can cut a run short.** A restart during the verify wait once skipped recording the switch time and the notification. Both now happen as soon as the command is sent, and a separate automation records every heat/cool change, including manual ones, so the minimum time between switches counts from them too.
 - **Don't drive switching off the setpoints.** An early version used "below the cool target" as "might need cooling", which in winter would have toggled heat and AC every couple of hours.
 
 ## Ideas / not yet done
